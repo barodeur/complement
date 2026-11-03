@@ -62,6 +62,34 @@ func TestDelayedEvents(t *testing.T) {
 		})
 	})
 
+	t.Run("cannot schedule a delayed event without a positive delay", func(t *testing.T) {
+		for i, tc := range []struct {
+			name string
+			body map[string]interface{}
+		}{
+			{"missing delay_ms", map[string]interface{}{"content": map[string]interface{}{}}},
+			{"zero delay_ms", getDelayedEventBody(0, map[string]interface{}{})},
+			{"negative delay_ms", getDelayedEventBody(-1, map[string]interface{}{})},
+			{"non-integer delay_ms", map[string]interface{}{"delay_ms": 1.5, "content": map[string]interface{}{}}},
+			{"string delay_ms", map[string]interface{}{"delay_ms": "1000", "content": map[string]interface{}{}}},
+			{"missing content", map[string]interface{}{"delay_ms": 1000}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				res := user.Do(
+					t,
+					"PUT",
+					getPathForDelayedEvent(roomID, eventType, fmt.Sprintf("txn-delayed-invalid-delay-%d", i)),
+					client.WithJSONBody(t, tc.body),
+				)
+				must.MatchResponse(t, res, match.HTTPResponse{
+					StatusCode: 400,
+				})
+			})
+		}
+
+		matchDelayedEvents(t, user, delayedEventsNumberEqual(0))
+	})
+
 	// FIXME: Too much mixing of tests that should be more independent
 	t.Run("delayed message events are sent on timeout", func(t *testing.T) {
 		var res *http.Response
@@ -75,15 +103,15 @@ func TestDelayedEvents(t *testing.T) {
 
 		countKey := "count"
 		numEvents := 3
-		for i, delayStr := range []string{"700", "800", "900"} {
+		for i, delayMs := range []int64{700, 800, 900} {
+			body := getDelayedEventBody(delayMs, map[string]interface{}{
+				countKey: i + 1,
+			})
 			res = user.MustDo(
 				t,
 				"PUT",
-				getPathForSend(roomID, eventType, fmt.Sprintf(txnIdBase, i)),
-				client.WithJSONBody(t, map[string]interface{}{
-					countKey: i + 1,
-				}),
-				getDelayQueryParam(delayStr),
+				getPathForDelayedEvent(roomID, eventType, fmt.Sprintf(txnIdBase, i)),
+				client.WithJSONBody(t, body),
 			)
 			delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -91,8 +119,8 @@ func TestDelayedEvents(t *testing.T) {
 				res := user.MustDo(
 					t,
 					"PUT",
-					getPathForSend(roomID, eventType, fmt.Sprintf(txnIdBase, i)),
-					getDelayQueryParam(delayStr),
+					getPathForDelayedEvent(roomID, eventType, fmt.Sprintf(txnIdBase, i)),
+					client.WithJSONBody(t, body),
 				)
 				must.MatchResponse(t, res, match.HTTPResponse{
 					JSON: []match.JSON{
@@ -146,11 +174,10 @@ func TestDelayedEvents(t *testing.T) {
 		user.MustDo(
 			t,
 			"PUT",
-			getPathForState(roomID, eventType, stateKey),
-			client.WithJSONBody(t, map[string]interface{}{
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-state-timeout"),
+			client.WithJSONBody(t, getDelayedStateEventBody(900, stateKey, map[string]interface{}{
 				setterKey: setterExpected,
-			}),
-			getDelayQueryParam("900"),
+			})),
 		)
 
 		// Ensure that a delayed event is now scheduled
@@ -200,7 +227,7 @@ func TestDelayedEvents(t *testing.T) {
 	})
 
 	t.Run("cannot update a delayed event without an action", func(t *testing.T) {
-		res := unauthedClient.Do(
+		res := user.Do(
 			t,
 			"POST",
 			append(getPathForDelayedEvents(), "abc"),
@@ -211,7 +238,7 @@ func TestDelayedEvents(t *testing.T) {
 	})
 
 	t.Run("cannot update a delayed event with an invalid action", func(t *testing.T) {
-		res := unauthedClient.Do(
+		res := user.Do(
 			t,
 			"POST",
 			append(getPathForDelayedEvents(), "abc", "oops"),
@@ -230,7 +257,7 @@ func TestDelayedEvents(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("cannot %s a delayed event without a matching delay ID", action), func(t *testing.T) {
 				t.Parallel()
-				res := unauthedClient.Do(
+				res := user.Do(
 					t,
 					"POST",
 					getPathForUpdateDelayedEvent("abc", action),
@@ -254,11 +281,10 @@ func TestDelayedEvents(t *testing.T) {
 		res = user.MustDo(
 			t,
 			"PUT",
-			getPathForState(roomID, eventType, stateKey),
-			client.WithJSONBody(t, map[string]interface{}{
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-state-cancel"),
+			client.WithJSONBody(t, getDelayedStateEventBody(1500, stateKey, map[string]interface{}{
 				setterKey: setterExpected,
-			}),
-			getDelayQueryParam("1500"),
+			})),
 		)
 		delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -274,7 +300,7 @@ func TestDelayedEvents(t *testing.T) {
 		})
 
 		// Cancel the delayed event
-		unauthedClient.MustDo(
+		user.MustDo(
 			t,
 			"POST",
 			getPathForUpdateDelayedEvent(delayID, DelayedEventActionCancel),
@@ -308,11 +334,10 @@ func TestDelayedEvents(t *testing.T) {
 		res = user.MustDo(
 			t,
 			"PUT",
-			getPathForState(roomID, eventType, stateKey),
-			client.WithJSONBody(t, map[string]interface{}{
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-state-send"),
+			client.WithJSONBody(t, getDelayedStateEventBody(100000, stateKey, map[string]interface{}{
 				setterKey: setterExpected,
-			}),
-			getDelayQueryParam("100000"),
+			})),
 		)
 		delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -328,7 +353,7 @@ func TestDelayedEvents(t *testing.T) {
 		})
 
 		// Force the delayed event to be sent immediately
-		unauthedClient.MustDo(
+		user.MustDo(
 			t,
 			"POST",
 			getPathForUpdateDelayedEvent(delayID, DelayedEventActionSend),
@@ -364,11 +389,10 @@ func TestDelayedEvents(t *testing.T) {
 		res = user.MustDo(
 			t,
 			"PUT",
-			getPathForState(roomID, eventType, stateKey),
-			client.WithJSONBody(t, map[string]interface{}{
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-state-restart"),
+			client.WithJSONBody(t, getDelayedStateEventBody(1500, stateKey, map[string]interface{}{
 				setterKey: setterExpected,
-			}),
-			getDelayQueryParam("1500"),
+			})),
 		)
 		delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -384,7 +408,7 @@ func TestDelayedEvents(t *testing.T) {
 		})
 
 		// Restart the timer on the delayed event
-		unauthedClient.MustDo(
+		user.MustDo(
 			t,
 			"POST",
 			getPathForUpdateDelayedEvent(delayID, DelayedEventActionRestart),
@@ -429,12 +453,12 @@ func TestDelayedEvents(t *testing.T) {
 		content := map[string]interface{}{
 			markerKey: markerExpected,
 		}
+		body := getDelayedEventBody(900, content)
 		res := user.MustDo(
 			t,
 			"PUT",
-			getPathForSend(roomID, eventType, "txn-delayed-msg-finalised-timeout"),
-			client.WithJSONBody(t, content),
-			getDelayQueryParam("900"),
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-msg-finalised-timeout"),
+			client.WithJSONBody(t, body),
 		)
 		delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -468,9 +492,8 @@ func TestDelayedEvents(t *testing.T) {
 		res = user.MustDo(
 			t,
 			"PUT",
-			getPathForSend(roomID, eventType, "txn-delayed-msg-finalised-cancel"),
-			client.WithJSONBody(t, map[string]interface{}{}),
-			getDelayQueryParam("100000"),
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-msg-finalised-cancel"),
+			client.WithJSONBody(t, getDelayedEventBody(100000, map[string]interface{}{})),
 		)
 		delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -522,9 +545,8 @@ func TestDelayedEvents(t *testing.T) {
 		res := user2.MustDo(
 			t,
 			"PUT",
-			getPathForState(failRoomID, eventType, stateKey),
-			client.WithJSONBody(t, map[string]interface{}{}),
-			getDelayQueryParam("1500"),
+			getPathForDelayedEvent(failRoomID, eventType, "txn-to-fail-on-timeout"),
+			client.WithJSONBody(t, getDelayedStateEventBody(1500, stateKey, map[string]interface{}{})),
 		)
 		delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -590,9 +612,8 @@ func TestDelayedEvents(t *testing.T) {
 			res := user.MustDo(
 				t,
 				"PUT",
-				getPathForSend(roomID, eventType, fmt.Sprintf("txn-delayed-msg-finalised-%s-actions", tc.name)),
-				client.WithJSONBody(t, map[string]interface{}{}),
-				getDelayQueryParam("100000"),
+				getPathForDelayedEvent(roomID, eventType, fmt.Sprintf("txn-delayed-msg-finalised-%s-actions", tc.name)),
+				client.WithJSONBody(t, getDelayedEventBody(100000, map[string]interface{}{})),
 			)
 			delayID := client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 
@@ -638,9 +659,8 @@ func TestDelayedEvents(t *testing.T) {
 			res = user.MustDo(
 				t,
 				"PUT",
-				getPathForSend(roomID, eventType, fmt.Sprintf("txn-delayed-msg-finalised-list-%d", i)),
-				client.WithJSONBody(t, map[string]interface{}{}),
-				getDelayQueryParam("100000"),
+				getPathForDelayedEvent(roomID, eventType, fmt.Sprintf("txn-delayed-msg-finalised-list-%d", i)),
+				client.WithJSONBody(t, getDelayedEventBody(100000, map[string]interface{}{})),
 			)
 			delayIDs[i] = client.GetJSONFieldStr(t, client.ParseJSON(t, res), "delay_id")
 		}
@@ -686,9 +706,8 @@ func TestDelayedEvents(t *testing.T) {
 		user.MustDo(
 			t,
 			"PUT",
-			getPathForState(roomID, eventType, stateKey1),
-			client.WithJSONBody(t, map[string]interface{}{}),
-			getDelayQueryParam("900"),
+			getPathForDelayedEvent(roomID, eventType, "txn-delayed-state-server-restart-1"),
+			client.WithJSONBody(t, getDelayedStateEventBody(900, stateKey1, map[string]interface{}{})),
 		)
 		numberOfDelayedEvents++
 
@@ -720,11 +739,10 @@ func TestDelayedEvents(t *testing.T) {
 			user.MustDo(
 				t,
 				"PUT",
+				getPathForDelayedEvent(roomID, eventType, fmt.Sprintf("txn-delayed-state-server-restart-%d", i+2)),
 				// Avoid clashing state keys as that would cancel previous delayed events on the
 				// same key (start at 2).
-				getPathForState(roomID, eventType, fmt.Sprintf("%d", i+2)),
-				client.WithJSONBody(t, map[string]interface{}{}),
-				getDelayQueryParam(fmt.Sprintf("%d", delay.Milliseconds())),
+				client.WithJSONBody(t, getDelayedStateEventBody(delay.Milliseconds(), fmt.Sprintf("%d", i+2), map[string]interface{}{})),
 			)
 			numberOfDelayedEvents++
 		}
@@ -785,18 +803,29 @@ func getPathForLookupDelayedEvent(delayID string) []string {
 	return append(getPathForDelayedEvents(), delayID)
 }
 
-func getPathForSend(roomID string, eventType string, txnId string) []string {
-	return []string{"_matrix", "client", "v3", "rooms", roomID, "send", eventType, txnId}
+func getPathForDelayedEvent(roomID string, eventType string, txnID string) []string {
+	return []string{"_matrix", "client", "unstable", "org.matrix.msc4140", "rooms", roomID, "delayed_event", eventType, txnID}
+}
+
+// getDelayedEventBody returns the body of a request to schedule a delayed message event
+// through `getPathForDelayedEvent`.
+func getDelayedEventBody(delayMs int64, content map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"delay_ms": delayMs,
+		"content":  content,
+	}
+}
+
+// getDelayedStateEventBody returns the body of a request to schedule a delayed state event
+// through `getPathForDelayedEvent`.
+func getDelayedStateEventBody(delayMs int64, stateKey string, content map[string]interface{}) map[string]interface{} {
+	body := getDelayedEventBody(delayMs, content)
+	body["state_key"] = stateKey
+	return body
 }
 
 func getPathForState(roomID string, eventType string, stateKey string) []string {
 	return []string{"_matrix", "client", "v3", "rooms", roomID, "state", eventType, stateKey}
-}
-
-func getDelayQueryParam(delayStr string) client.RequestOpt {
-	return client.WithQueries(url.Values{
-		"org.matrix.msc4140.delay": []string{delayStr},
-	})
 }
 
 func getDelayedEvents(t *testing.T, user *client.CSAPI) *http.Response {
